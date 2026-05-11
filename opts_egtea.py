@@ -108,11 +108,6 @@ def parse_opt():
         action='store_true',
         help='Enable Dual-Scale Temporal Encoder. When omitted, MyNet runs as the baseline without DSE.')
     parser.add_argument(
-        '--decoupled',
-        default=False,
-        action='store_true',
-        help='Decouple classification and boundary queries in the decoder (MATR-style).')
-    parser.add_argument(
         '--diou',
         default=False,
         action='store_true',
