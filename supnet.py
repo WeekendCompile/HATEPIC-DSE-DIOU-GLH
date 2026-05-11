@@ -6,7 +6,7 @@ import torch.nn.parallel
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import opts_epic as opts
+import opts_egtea as opts
 import time
 import h5py
 from iou_utils import *
@@ -221,7 +221,7 @@ def eval_frame(opt, model, dataset):
 
 def test(opt): 
     model = SuppressNet(opt)
-    checkpoint = torch.load(opt["checkpoint_path"]+"/" + opt['exp'] + "ckp_best_suppress.pth.tar")
+    checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best_suppress.pth.tar")
     base_dict = checkpoint['state_dict']
     
     # Handle DataParallel state dict loading
