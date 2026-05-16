@@ -31,7 +31,7 @@ def setup_multi_gpu():
 
 def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     # Increase num_workers for multi-GPU setup
-    num_workers = min(8, os.cpu_count())
+    num_workers = min(0, os.cpu_count())
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                 batch_size=opt['batch_size'], shuffle=True,
                                                 num_workers=num_workers, pin_memory=True,
@@ -40,9 +40,12 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     epoch_cost_cls = 0
     epoch_cost_reg = 0
     epoch_cost_diou = 0
+    epoch_cost_kl = 0
 
     total_iter = len(train_dataset)//opt['batch_size']
     use_diou = bool(opt.get('diou', False))
+    use_glh = bool(opt.get('GLH', False))
+    glh_kl_weight = float(opt.get('glh_kl_weight', 1e-4))
 
     for n_iter,(input_data,cls_label,reg_label,_) in enumerate(tqdm(train_loader)):
 
@@ -70,13 +73,19 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
             epoch_cost_diou += cost_diou.detach().cpu().item()
             cost = cost + opt['diou_weight'] * cost_diou
 
+        if use_glh:
+            glh_module = model.module.glh if hasattr(model, 'module') else model.glh
+            cost_kl = glh_module.kl_loss()
+            epoch_cost_kl += cost_kl.detach().cpu().item()
+            cost = cost + glh_kl_weight * cost_kl
+
         epoch_cost += cost.detach().cpu().item()
 
         optimizer.zero_grad()
         cost.backward()
         optimizer.step()
 
-    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou
+    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou, epoch_cost_kl
 
 def eval_one_epoch(opt, model, test_dataset):
     cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames = eval_frame(opt, model, test_dataset)
@@ -129,22 +138,17 @@ def train(opt):
             warmup = False
         
         model.train()
-        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
+        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_diou, epoch_cost_kl = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
 
         writer.add_scalars('data/cost', {'train': epoch_cost/(n_iter+1)}, n_epoch)
+        log_parts = "training loss(epoch %d): %.03f, cls - %f, reg - %f" % (
+            n_epoch, epoch_cost/(n_iter+1), epoch_cost_cls/(n_iter+1), epoch_cost_reg/(n_iter+1))
         if opt.get('diou', False):
-            print("training loss(epoch %d): %.03f, cls - %f, reg - %f, diou - %f, lr - %f"%(n_epoch,
-                                                                                epoch_cost/(n_iter+1),
-                                                                                epoch_cost_cls/(n_iter+1),
-                                                                                epoch_cost_reg/(n_iter+1),
-                                                                                epoch_cost_diou/(n_iter+1),
-                                                                                optimizer.param_groups[-1]["lr"]))
-        else:
-            print("training loss(epoch %d): %.03f, cls - %f, reg - %f, lr - %f"%(n_epoch,
-                                                                                epoch_cost/(n_iter+1),
-                                                                                epoch_cost_cls/(n_iter+1),
-                                                                                epoch_cost_reg/(n_iter+1),
-                                                                                optimizer.param_groups[-1]["lr"]))
+            log_parts += ", diou - %f" % (epoch_cost_diou/(n_iter+1),)
+        if opt.get('GLH', False):
+            log_parts += ", kl - %f" % (epoch_cost_kl/(n_iter+1),)
+        log_parts += ", lr - %f" % (optimizer.param_groups[-1]["lr"],)
+        print(log_parts)
         
         scheduler.step()
         model.eval()
@@ -185,7 +189,7 @@ def train(opt):
 
 def eval_frame(opt, model, dataset):
     # Increase num_workers for better data loading
-    num_workers = min(8, os.cpu_count())
+    num_workers = min(0, os.cpu_count())
     test_loader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=opt['batch_size'], shuffle=False,
                                                 num_workers=num_workers, pin_memory=True,
@@ -632,6 +636,8 @@ if __name__ == '__main__':
         "ENABLED" if opt.get('DSE', False) else "DISABLED (baseline MyNet only)"))
     print("[Config] DIoU regression loss: {}".format(
         "ENABLED (w={})".format(opt.get('diou_weight', 1.0)) if opt.get('diou', False) else "DISABLED"))
+    print("[Config] GLH (Gaussian Latent History): {}".format(
+        "ENABLED (K={}, kl_w={})".format(opt.get('glh_gaussians', 8), opt.get('glh_kl_weight', 1e-4)) if opt.get('GLH', False) else "DISABLED"))
 
     main(opt)
     while(opt['wterm']):
