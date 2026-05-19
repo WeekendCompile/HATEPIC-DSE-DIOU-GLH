@@ -6,7 +6,7 @@ import torch.nn.parallel
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import opts_egtea as opts
+import opts_epic as opts
 import time
 import h5py
 from iou_utils import *
@@ -17,31 +17,14 @@ from models import MYNET, SuppressNet
 from loss_func import cls_loss_func, regress_loss_func, suppress_loss_func
 from tqdm import tqdm
 
-def setup_multi_gpu():
-    """Setup multi-GPU environment"""
-    if torch.cuda.is_available():
-        num_gpus = torch.cuda.device_count()
-        print(f"Number of GPUs available: {num_gpus}")
-        for i in range(num_gpus):
-            print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-        return num_gpus
-    return 0
-
 def train_one_epoch(opt, model, train_dataset, optimizer):
-    # Increase num_workers for multi-GPU setup
-    num_workers = min(8, os.cpu_count())
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                 batch_size=opt['batch_size'], shuffle=True,
-                                                num_workers=num_workers, pin_memory=True,
-                                                drop_last=False)      
+                                                num_workers=8, pin_memory=True,drop_last=False)      
     epoch_cost = 0
     
     for n_iter,(input_data,label) in enumerate(tqdm(train_loader)):
-        # Move data to GPU (DataParallel will handle distribution)
-        input_data = input_data.cuda()
-        label = label.cuda()
-        
-        suppress_conf = model(input_data)
+        suppress_conf = model(input_data.cuda())
         
         loss = suppress_loss_func(label,suppress_conf)
         epoch_cost+= loss.detach().cpu().numpy()    
@@ -53,20 +36,13 @@ def train_one_epoch(opt, model, train_dataset, optimizer):
     return n_iter, epoch_cost
 
 def eval_one_epoch(opt, model, test_dataset):
-    # Increase num_workers for better data loading
-    num_workers = min(8, os.cpu_count())
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                                 batch_size=opt['batch_size'], shuffle=False,
-                                                num_workers=num_workers, pin_memory=True,
-                                                drop_last=False)   
+                                                num_workers=8, pin_memory=True,drop_last=False)   
     epoch_cost = 0
     
     for n_iter,(input_data,label) in enumerate(tqdm(test_loader)):
-        # Move data to GPU
-        input_data = input_data.cuda()
-        label = label.cuda()
-        
-        suppress_conf = model(input_data)
+        suppress_conf = model(input_data.cuda())
         
         loss = suppress_loss_func(label,suppress_conf)
         epoch_cost+= loss.detach().cpu().numpy()    
@@ -75,36 +51,16 @@ def eval_one_epoch(opt, model, test_dataset):
 
     
 def train(opt): 
-    # Setup multi-GPU
-    num_gpus = setup_multi_gpu()
-    
     writer = SummaryWriter()
-    model = SuppressNet(opt)
+    model = SuppressNet(opt).cuda()
     
-    # Enable multi-GPU training if available
-    if num_gpus > 1:
-        print(f"Using {num_gpus} GPUs for training")
-        model = torch.nn.DataParallel(model)
-        # Adjust batch size for multi-GPU
-        opt['effective_batch_size'] = opt['batch_size'] * num_gpus
-        print(f"Effective batch size: {opt['effective_batch_size']}")
+    optimizer = optim.Adam( model.parameters(),lr=opt["lr"],weight_decay = opt["weight_decay"])     
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,step_size = opt["lr_step"])
     
-    model = model.cuda()
-    
-    # Initialize best_loss attribute for DataParallel models
-    if hasattr(model, 'module'):
-        model.module.best_loss = float('inf')
-    else:
-        model.best_loss = float('inf')
-    
-    optimizer = optim.Adam(model.parameters(), lr=opt["lr"], weight_decay=opt["weight_decay"])     
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt["lr_step"])
-    
-    train_dataset = SuppressDataSet(opt, subset="train")      
-    test_dataset = SuppressDataSet(opt, subset=opt['inference_subset'])
+    train_dataset = SuppressDataSet(opt,subset="train")      
+    test_dataset = SuppressDataSet(opt,subset=opt['inference_subset'])
     
     for n_epoch in range(opt['epoch']):   
-        model.train()
         n_iter, epoch_cost = train_one_epoch(opt, model, train_dataset, optimizer)
             
         writer.add_scalars('sup_data/cost', {'train': epoch_cost/(n_iter+1)}, n_epoch)
@@ -115,42 +71,27 @@ def train(opt):
         scheduler.step()
         model.eval()
         
-        # Use torch.no_grad() for evaluation to save memory
-        with torch.no_grad():
-            n_iter, eval_cost = eval_one_epoch(opt, model, test_dataset)
+        n_iter, eval_cost = eval_one_epoch(opt, model,test_dataset)
         
         writer.add_scalars('sup_data/eval', {'test': eval_cost/(n_iter+1)}, n_epoch)
-        print("testing loss(epoch %d): %f"%(n_epoch, eval_cost/(n_iter+1)))
-        
-        # Handle state dict for DataParallel models
-        if hasattr(model, 'module'):
-            state_dict = model.module.state_dict()
-            best_loss = model.module.best_loss
-        else:
-            state_dict = model.state_dict()
-            best_loss = model.best_loss
+        print("testing loss(epoch %d): %f"%(n_epoch,eval_cost/(n_iter+1)))
                     
         state = {'epoch': n_epoch + 1,
-                'state_dict': state_dict}
+                    'state_dict': model.state_dict()}
         torch.save(state, opt["checkpoint_path"]+"/checkpoint_suppress_"+str(n_epoch+1)+".pth.tar" )
-        
-        if eval_cost < best_loss:
-            if hasattr(model, 'module'):
-                model.module.best_loss = eval_cost
-            else:
-                model.best_loss = eval_cost
+        if eval_cost < model.best_loss:
+            model.best_loss = eval_cost
             torch.save(state, opt["checkpoint_path"]+"/ckp_best_suppress.pth.tar" )
+            
+        model.train()
                 
     writer.close()
     return 
 
 def eval_frame(opt, model, dataset):
-    # Increase num_workers for better data loading
-    num_workers = min(8, os.cpu_count())
     test_loader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=opt['batch_size'], shuffle=False,
-                                                num_workers=num_workers, pin_memory=True,
-                                                drop_last=False)
+                                                num_workers=8, pin_memory=True,drop_last=False)
     
     labels_cls={}
     labels_reg={}
@@ -169,12 +110,7 @@ def eval_frame(opt, model, dataset):
     epoch_cost_reg = 0   
     
     for n_iter,(input_data,cls_label,reg_label, _) in enumerate(tqdm(test_loader)):
-        # Move data to GPU
-        input_data = input_data.cuda()
-        cls_label = cls_label.cuda()
-        reg_label = reg_label.cuda()
-        
-        act_cls, act_reg = model(input_data)
+        act_cls, act_reg, _ = model(input_data.cuda())
         
         cost_reg = 0
         cost_cls = 0
@@ -200,8 +136,8 @@ def eval_frame(opt, model, dataset):
             video_name, st, ed, data_idx = dataset.inputs[n_iter*opt['batch_size']+b]
             output_cls[video_name]+=[act_cls[b,:].detach().cpu().numpy()]
             output_reg[video_name]+=[act_reg[b,:].detach().cpu().numpy()]
-            labels_cls[video_name]+=[cls_label[b,:].detach().cpu().numpy()]
-            labels_reg[video_name]+=[reg_label[b,:].detach().cpu().numpy()]
+            labels_cls[video_name]+=[cls_label[b,:].numpy()]
+            labels_reg[video_name]+=[reg_label[b,:].numpy()]
         
     end_time = time.time()
     working_time = end_time-start_time
@@ -212,51 +148,38 @@ def eval_frame(opt, model, dataset):
         output_cls[video_name]=np.stack(output_cls[video_name], axis=0)
         output_reg[video_name]=np.stack(output_reg[video_name], axis=0)
     
-    cls_loss=epoch_cost_cls/n_iter if n_iter > 0 else 0
-    reg_loss=epoch_cost_reg/n_iter if n_iter > 0 else 0
-    tot_loss=epoch_cost/n_iter if n_iter > 0 else 0
+    cls_loss=epoch_cost_cls/n_iter
+    reg_loss=epoch_cost_reg/n_iter
+    tot_loss=epoch_cost/n_iter
      
     return cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames
 
 
 def test(opt): 
-    model = SuppressNet(opt)
-    checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best_suppress.pth.tar")
-    base_dict = checkpoint['state_dict']
-    
-    # Handle DataParallel state dict loading
-    if any(key.startswith('module.') for key in base_dict.keys()):
-        base_dict = {k.replace('module.', ''): v for k, v in base_dict.items()}
-    
+    model = SuppressNet(opt).cuda()
+    checkpoint = torch.load(opt["checkpoint_path"]+"/" + opt['exp'] + "ckp_best_suppress.pth.tar")
+    base_dict=checkpoint['state_dict']
     model.load_state_dict(base_dict)
-    model = model.cuda()
     model.eval()
     
-    dataset = SuppressDataSet(opt, subset=opt['inference_subset'])
+    dataset = SuppressDataSet(opt,subset=opt['inference_subset'])
     
-    # Increase num_workers for better data loading
-    num_workers = min(8, os.cpu_count())
     test_loader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=opt['batch_size'], shuffle=False,
-                                                num_workers=num_workers, pin_memory=True,
-                                                drop_last=False)   
+                                                num_workers=8, pin_memory=True,drop_last=False)   
     labels={}
     output={}                                   
     for video_name in dataset.video_list:
         labels[video_name]=[]
         output[video_name]=[]
         
-    with torch.no_grad():
-        for n_iter,(input_data,label) in enumerate(test_loader):
-            # Move data to GPU
-            input_data = input_data.cuda()
-            
-            suppress_conf = model(input_data)
-              
-            for b in range(0,input_data.size(0)):
-                video_name, idx = dataset.inputs[n_iter*opt['batch_size']+b]
-                output[video_name]+=[suppress_conf[b,:].detach().cpu().numpy()]
-                labels[video_name]+=[label[b,:].numpy()]
+    for n_iter,(input_data,label) in enumerate(test_loader):
+        suppress_conf = model(input_data.cuda())
+          
+        for b in range(0,input_data.size(0)):
+            video_name, idx = dataset.inputs[n_iter*opt['batch_size']+b]
+            output[video_name]+=[suppress_conf[b,:].detach().cpu().numpy()]
+            labels[video_name]+=[label[b,:].numpy()]
         
     for video_name in dataset.video_list:
         labels[video_name]=np.stack(labels[video_name], axis=0)
@@ -277,22 +200,16 @@ def test(opt):
 
 
 def make_dataset(opt): 
-    model = MYNET(opt)
+    
+    model = MYNET(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/"+opt['exp']+"_ckp_best.pth.tar")
-    base_dict = checkpoint['state_dict']
-    
-    # Handle DataParallel state dict loading
-    if any(key.startswith('module.') for key in base_dict.keys()):
-        base_dict = {k.replace('module.', ''): v for k, v in base_dict.items()}
-    
+    base_dict=checkpoint['state_dict']
     model.load_state_dict(base_dict)
-    model = model.cuda()
     model.eval()
     
-    dataset = VideoDataSet(opt, subset=opt['inference_subset'])
+    dataset = VideoDataSet(opt,subset=opt['inference_subset'])
     
-    with torch.no_grad():
-        _, _, _, output_cls, output_reg, labels_cls, labels_reg, _, _ = eval_frame(opt, model, dataset)
+    _, _, _, output_cls, output_reg, labels_cls, labels_reg, _, _ = eval_frame(opt, model,dataset)
     
     proposal_dict=[]
     
@@ -374,9 +291,6 @@ def main(opt):
     return
 
 if __name__ == '__main__':
-    # Set environment variables for better multi-GPU performance
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-    
     opt = opts.parse_opt()
     opt = vars(opt)
     if not os.path.exists(opt["checkpoint_path"]):
@@ -389,8 +303,7 @@ if __name__ == '__main__':
         seed = opt['seed'] 
         torch.manual_seed(seed)
         np.random.seed(seed)
-        # For reproducibility in multi-GPU training
-        torch.cuda.manual_seed_all(seed)
+        #random.seed(seed)
           
     opt['anchors'] = [int(item) for item in opt['anchors'].split(',')]  
         
