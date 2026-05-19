@@ -263,7 +263,7 @@ class MYNET(torch.nn.Module):
         # Positional encoding
         self.positional_encoding = PositionalEncoding(
             n_embedding_dim, 
-            dropout=dropout,
+            dropout=dropout*0.5,
             maxlen=400,
             scale_factor=0.5
         )
@@ -283,7 +283,7 @@ class MYNET(torch.nn.Module):
             nn.TransformerEncoderLayer(
                 d_model=n_embedding_dim, 
                 nhead=n_enc_head, 
-                dropout=dropout,  # Lower dropout for initial layers
+                dropout=dropout * (0.5 if i < 2 else 1.0),  # Lower dropout for initial layers
                 activation='gelu'
             ) for i in range(n_enc_layer)
         ])
@@ -336,8 +336,8 @@ class MYNET(torch.nn.Module):
         # Additional normalization layers
         self.norm1 = nn.LayerNorm(n_embedding_dim)
         self.norm2 = nn.LayerNorm(n_embedding_dim)
-        self.dropout1 = nn.Dropout(0.1)
-        self.dropout2 = nn.Dropout(0.1)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
 
         self.relu = nn.ReLU(True)
         self.softmaxd1 = nn.Softmax(dim=-1)
